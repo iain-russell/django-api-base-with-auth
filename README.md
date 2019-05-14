@@ -428,3 +428,192 @@ urlpatterns = [
     path('api/user/', include('user.urls')),
 ]
 ```
+## Add token authentication to user
+In /app/user/test_user_api.py add the following tests
+```
+TOKEN_URL = reverse('user:token')
+
+
+def test_create_token_for_user(self):
+        # Test that a token is created for the user
+        payload = {'email': 'test@gmail.com', 'password': 'testpass'}
+        create_user(**payload)
+        res = self.client.post(TOKEN_URL, payload)
+
+        self.assertIn('token', res.data)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+    def test_create_token_invalid_credentials(self):
+        # Test that token is not created if invalid credentials are given
+        create_user(email='test@gmail.com', password='testpass')
+        payload = {'email': 'test@gmail.com', 'password': 'wrong'}
+        res = self.client.post(TOKEN_URL, payload)
+
+        self.assertNotIn('token', res.data)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_token_no_user(self):
+        # Test that the token is not created if user doesn't exist
+        payload = {'email': 'test@gmail.com', 'password': 'testpass'}
+        res = self.client.post(TOKEN_URL, payload)
+
+        self.assertNotIn('token', res.data)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_token_missing_field(self):
+        # Test the email and password are required
+        payload = {'email': 'one', 'password': ''}
+        res = self.client.post(TOKEN_URL, payload)
+        self.assertNotIn('token', res.data)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+```
+Add AuthTokenSerializer to app/user/serializers.py
+
+```
+from django.contrib.auth import get_user_model, authenticate
+from django.utils.translation import ugettext_lazy as _
+
+from rest_framework import serializers
+
+
+class AuthTokenSerializer(serializers.Serializer):
+    # Serializers for the user
+    email = serializers.CharField()
+    password = serializers.CharField(
+        style={'input_type': 'password'},
+        trim_whitespace=False
+    )
+
+
+    def validate(self, attrs):
+        """Validate and authenticate the user"""
+        email = attrs.get('email')
+        password = attrs.get('password')
+
+        user = authenticate(
+            request=self.context.get('request'),
+            username=email,
+            password=password
+        )
+        if not user:
+            msg = _('Unable to authenticate with provided credentials')
+            raise serializers.ValidationError(msg, code='authentication')
+
+        attrs['user'] = user
+        return attrs
+```
+
+Add the create token view to /app/users/views.py
+The renderer class adds a ui for the api in the browser
+```
+from rest_framework import generics, authentication, permissions
+from rest_framework.authtoken.views import ObtainAuthToken
+from rest_framework.settings import api_settings
+
+from user.serializers import UserSerializer, AuthTokenSerializer
+
+
+class CreateTokenView(ObtainAuthToken):
+    # Create a new auth token for user
+    serializer_class = AuthTokenSerializer
+    renderer_classes = api_settings.DEFAULT_RENDERER_CLASSES
+```
+Add the create token path to the /app/users/urls.py
+```
+path('token/', views.CreateTokenView.as_view(), name='token'),
+```
+
+## Create user manager for users
+Allows users to see and change their details (name, password, etc)
+
+In /app/user/test_user_api.py add the following tests
+
+The me url links to user personal info
+
+```
+ME_URL = reverse('user:me')
+
+
+def test_retrieve_user_unauthorized(self):
+    """Test that authentication is required for users"""
+    res = self.client.get(ME_URL)
+
+    self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+    class PrivateUserApiTests(TestCase):
+        """Test API requests that reqiure authentication"""
+
+        def setUp(self):
+            self.user = create_user(
+                email='test@gmail.com',
+                password='testpass',
+                name='name'
+            )
+            self.client = APIClient()
+            self.client.force_authenticate(user=self.user)
+
+        def test_retrieve_profile_success(self):
+            """Test retrieving profile for logged in user"""
+            res = self.client.get(ME_URL)
+
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            self.assertEqual(res.data, {
+                'name': self.user.name,
+                'email': self.user.email
+            })
+
+        def test_post_me_not_allowed(self):
+            """Test that POST is not allowed on the me url"""
+            res = self.client.post(ME_URL, {})
+
+            self.assertEqual(res.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+        def test_update_user_profile(self):
+            """Test that updating the user profile for authenticated user"""
+            payload = {'name': 'new name', 'password': 'newpassword'}
+
+            res = self.client.patch(ME_URL, payload)
+
+            self.user.refresh_from_db()
+            self.assertEqual(self.user.name, payload['name'])
+            self.assertTrue(self.user.check_password(payload['password']))
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+```
+Add the ManageUserView to /app/users/views.py
+The get_object is customized to return the request.user
+```
+from rest_framework import generics, authentication, permissions
+from rest_framework.authtoken.views import ObtainAuthToken
+from rest_framework.settings import api_settings
+
+from user.serializers import UserSerializer, AuthTokenSerializer
+
+
+class ManageUserView(generics.RetrieveUpdateAPIView):
+    """Manage the authenticated user"""
+    serializer_class = UserSerializer
+    authentication_classes = (authentication.TokenAuthentication,)
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get_object(self):
+        """Retrieve and return authenication user"""
+        return self.request.user
+```
+In /app/user/serializers.py add a user info update function for the UserSerializer
+```
+    def update(self, instance, validated_data):
+        """Update a user, setting the password correctly and return it"""
+        password = validated_data.pop('password', None)
+        user = super().update(instance, validated_data)
+
+        if password:
+            user.set_password(password)
+            user.save()
+
+        return user
+```
+Add the ManageUserView path to /app/user/urls.py
+```
+path('me/', views.ManageUserView.as_view(), name='me'),
+```
